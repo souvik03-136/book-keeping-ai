@@ -25,6 +25,10 @@ Here are some images related to the project:
 	<img src="demand_forecast/assets/4.png" width="400" alt="Image 4"/>
 	<img src="demand_forecast/assets/5.png" width="400" alt="Image 5"/>
 	<img src="demand_forecast/assets/6.png" width="400" alt="Image 6"/>
+	<img src="demand_forecast/assets/7.png" width="400" alt="Image 7"/>
+	<img src="demand_forecast/assets/8.png" width="400" alt="Image 8"/>
+	<img src="demand_forecast/assets/9.png" width="400" alt="Image 9"/>
+	<img src="demand_forecast/assets/10.png" width="400" alt="Image 10"/>
 </p>
 
 ---
