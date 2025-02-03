@@ -42,16 +42,6 @@ Here are some images related to the project:
 {"action":"less","object":"apples","range":"50"}
 ```
 
----
-
-## Dependencies
- - Flask==2.3.3
- - groq==0.9.0
- - python-dotenv==1.0.1
- - Werkzeug==2.3.7
-
----
-
 ## Running
 
 ### Installation
