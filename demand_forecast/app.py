@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from functools import wraps
 
-from flask import Flask, request, jsonify, send_file, g
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -18,7 +18,7 @@ from marshmallow import Schema, fields, ValidationError
 from celery.result import AsyncResult
 
 from tasks import celery_app, run_forecast_task
-from utils import load_data, allowed_file, get_upload_path, sanitize_item_id
+from utils import allowed_file, get_upload_path, sanitize_item_id
 
 # ---------------------------------------------------------------------------
 # App setup

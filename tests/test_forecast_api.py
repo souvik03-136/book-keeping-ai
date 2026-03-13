@@ -1,12 +1,12 @@
-
 """
 Tests — Demand Forecast Service
 ================================
 Run with:  pytest tests/ -v
 """
 
+import csv
 import io
-import json
+
 import pytest
 
 
@@ -20,7 +20,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("API_KEY", "test-key")
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
 
-    from demand_forecast.app import app as flask_app
+    from app import app as flask_app  # flat import — demand_forecast/ is on sys.path via conftest
     flask_app.config["TESTING"] = True
     with flask_app.test_client() as c:
         yield c
@@ -30,7 +30,6 @@ HEADERS = {"X-API-Key": "test-key", "Content-Type": "application/json"}
 
 
 def _make_csv(rows: list[dict]) -> io.BytesIO:
-    import csv, io
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=["transaction_date", "item_id", "quantity"])
     writer.writeheader()
@@ -160,7 +159,7 @@ def test_configure_alert_invalid_email(client):
 # ---------------------------------------------------------------------------
 
 def test_sanitize_item_id():
-    from demand_forecast.utils import sanitize_item_id
+    from utils import sanitize_item_id
     assert sanitize_item_id("A001") == "A001"
     assert sanitize_item_id("../../etc/passwd") == "______etc_passwd"
     assert sanitize_item_id("item id with spaces") == "item_id_with_spaces"
@@ -168,7 +167,7 @@ def test_sanitize_item_id():
 
 def test_load_data_missing_columns(tmp_path):
     import pandas as pd
-    from demand_forecast.utils import load_data
+    from utils import load_data
     bad = tmp_path / "bad.csv"
     pd.DataFrame({"date": ["2023-01-01"], "qty": [5]}).to_csv(bad, index=False)
     with pytest.raises(ValueError, match="missing required columns"):
@@ -177,7 +176,7 @@ def test_load_data_missing_columns(tmp_path):
 
 def test_load_data_valid(tmp_path):
     import pandas as pd
-    from demand_forecast.utils import load_data
+    from utils import load_data
     good = tmp_path / "good.csv"
     pd.DataFrame({
         "transaction_date": ["2023-01-15", "2023-02-15"],

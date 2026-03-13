@@ -1,0 +1,9 @@
+[lint]
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E402",   # Module level import not at top — intentional in forecasting.py
+              # (env vars and warnings.filterwarnings must run before TF/statsmodels import)
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["F401"]   # test files import things that look unused to ruff
