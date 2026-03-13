@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
 LABEL maintainer="GDSC-VIT"
-LABEL description="Demand Forecasting Service"
+LABEL description="Entity Detection Service"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -10,33 +10,28 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# System deps
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    libgomp1 \
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Python deps
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
-# Application code
+# Download spaCy model at build time (not runtime)
+RUN python -m spacy download en_core_web_sm
+
 COPY . .
 
-RUN mkdir -p uploads
-
-# Non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
-EXPOSE 5000
+EXPOSE 5001
 
 CMD ["gunicorn", \
      "--workers", "2", \
      "--worker-class", "gthread", \
      "--threads", "4", \
-     "--timeout", "120", \
-     "--bind", "0.0.0.0:5000", \
+     "--timeout", "60", \
+     "--bind", "0.0.0.0:5001", \
      "--access-logfile", "-", \
      "--error-logfile", "-", \
      "app:app"]

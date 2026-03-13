@@ -1,0 +1,154 @@
+version: "3.9"
+
+# =============================================================================
+# Book-Keeping AI — Production Docker Compose
+# =============================================================================
+# Services:
+#   redis            — Celery broker + result backend + rate-limiter storage
+#   forecast-api     — Flask API for demand forecasting
+#   forecast-worker  — Celery worker for async forecast jobs
+#   forecast-beat    — Celery Beat scheduler (daily alert checks)
+#   entity-api       — Flask API for entity extraction
+#   nginx            — Reverse proxy (TLS termination, routing)
+# =============================================================================
+
+x-common-env: &common-env
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  REDIS_URL: redis://redis:6379/0
+  ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-*}
+  API_KEY: ${API_KEY:-changeme}
+  SECRET_KEY: ${SECRET_KEY:-changeme-secret}
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Redis
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Demand Forecast API
+  # ---------------------------------------------------------------------------
+  forecast-api:
+    build:
+      context: ./demand_forecast
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      <<: *common-env
+      UPLOAD_FOLDER: /app/uploads
+      MAX_UPLOAD_MB: "32"
+    volumes:
+      - forecast-uploads:/app/uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Celery Worker (forecast jobs)
+  # ---------------------------------------------------------------------------
+  forecast-worker:
+    build:
+      context: ./demand_forecast
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: >
+      celery -A tasks.celery_app worker
+        --loglevel=info
+        --concurrency=2
+        --queues=celery
+        --max-memory-per-child=512000
+    environment:
+      <<: *common-env
+      UPLOAD_FOLDER: /app/uploads
+    volumes:
+      - forecast-uploads:/app/uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Celery Beat (scheduler)
+  # ---------------------------------------------------------------------------
+  forecast-beat:
+    build:
+      context: ./demand_forecast
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: >
+      celery -A tasks.celery_app beat
+        --loglevel=info
+        --scheduler celery.beat:PersistentScheduler
+    environment:
+      <<: *common-env
+      UPLOAD_FOLDER: /app/uploads
+      ENV: ${ENV:-production}
+    volumes:
+      - forecast-uploads:/app/uploads
+      - beat-schedule:/app/celerybeat-schedule
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Entity Detection API
+  # ---------------------------------------------------------------------------
+  entity-api:
+    build:
+      context: ./entity_detection
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "5001:5001"
+    environment:
+      <<: *common-env
+      GROQ_API_KEY: ${GROQ_API_KEY}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Nginx reverse proxy
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - forecast-api
+      - entity-api
+
+# ---------------------------------------------------------------------------
+# Volumes
+# ---------------------------------------------------------------------------
+volumes:
+  redis-data:
+  forecast-uploads:
+  beat-schedule:
