@@ -1,4 +1,3 @@
-
 name: CI
 
 on:
@@ -32,22 +31,20 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install forecast deps
-        run: pip install -r demand_forecast/requirements.txt
-
-      - name: Install entity detection deps
+      - name: Install all deps
         run: |
+          pip install -r demand_forecast/requirements.txt
           pip install -r entity_detection/requirements.txt
           python -m spacy download en_core_web_sm
-
-      - name: Install test deps
-        run: pip install pytest
+          pip install pytest ruff
 
       - name: Run tests
         env:
           API_KEY: test-key
           REDIS_URL: redis://localhost:6379/0
           GROQ_API_KEY: dummy-for-tests
+          # Both service dirs on PYTHONPATH so flat internal imports resolve
+          PYTHONPATH: ${{ github.workspace }}/demand_forecast:${{ github.workspace }}/entity_detection:${{ github.workspace }}
         run: pytest tests/ -v --tb=short
 
   lint:
@@ -65,8 +62,8 @@ jobs:
       - name: Install ruff
         run: pip install ruff
 
-      - name: Lint with ruff
-        run: ruff check demand_forecast/ entity_detection/ tests/
+      - name: Lint
+        run: ruff check --config ruff.toml demand_forecast/ entity_detection/ tests/
 
   docker:
     name: Docker Build Check

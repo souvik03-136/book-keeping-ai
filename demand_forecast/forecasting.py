@@ -14,26 +14,28 @@ import os
 import logging
 import warnings
 
-import numpy as np
-import pandas as pd
-
-# Silence noisy TF / statsmodels output before imports
+# Must be set before tensorflow/statsmodels are imported
 os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 os.environ.setdefault("TF_KERAS", "1")
 warnings.filterwarnings("ignore")
 
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+from statsmodels.tools.sm_exceptions import ConvergenceWarning
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.stattools import adfuller
-from statsmodels.tools.sm_exceptions import ConvergenceWarning
+
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
 import tensorflow as tf
+
 tf.get_logger().setLevel("ERROR")
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
+
 from tensorflow.keras.callbacks import EarlyStopping
-from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
+from tensorflow.keras.models import Sequential
 
 logger = logging.getLogger("demand_forecast.forecasting")
 

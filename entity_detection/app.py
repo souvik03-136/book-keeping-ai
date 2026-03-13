@@ -1,4 +1,3 @@
-
 """
 Entity Detection Service — Production
 ======================================
@@ -13,17 +12,17 @@ Both endpoints validate input with marshmallow, apply rate limiting, and
 return structured, consistent JSON responses.
 """
 
+import logging
 import os
 import re
-import logging
+from functools import wraps
 
+from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from marshmallow import Schema, fields, ValidationError, validate
-from functools import wraps
-from dotenv import load_dotenv
 
 load_dotenv()
 

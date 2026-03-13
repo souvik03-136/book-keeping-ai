@@ -1,4 +1,3 @@
-
 """
 Tests — Entity Detection Service
 =================================
@@ -14,7 +13,7 @@ def client(monkeypatch):
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
     monkeypatch.setenv("GROQ_API_KEY", "dummy-key-for-tests")
 
-    from entity_detection.app import app as flask_app
+    from app import app as flask_app  # flat import — entity_detection/ is on sys.path via conftest
     flask_app.config["TESTING"] = True
     with flask_app.test_client() as c:
         yield c

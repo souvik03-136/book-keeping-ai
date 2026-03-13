@@ -10,17 +10,17 @@ check_all_alerts    — Periodic task (Celery Beat) that scans alert configs and
                       sends notifications when predicted demand exceeds stock.
 """
 
-import os
 import json
 import logging
-from pathlib import Path
+import os
 from datetime import datetime
+from pathlib import Path
 
 from celery import Celery
 from celery.schedules import crontab
 
-from forecasting import predict_demand, check_stock_and_alert
 from bokeh_forecast import create_bokeh_plots
+from forecasting import check_stock_and_alert, predict_demand
 from utils import load_data
 
 logger = logging.getLogger("demand_forecast.tasks")
@@ -38,6 +38,20 @@ celery_app = Celery(
     backend=REDIS_URL,
 )
 
+# Build beat schedule — never include an entry with schedule=None,
+# which crashes Celery Beat at startup.
+_beat_schedule: dict = {
+    "check-all-alerts-daily": {
+        "task": "tasks.check_all_alerts",
+        "schedule": crontab(hour=8, minute=0),  # 08:00 UTC every day
+    },
+}
+if os.getenv("ENV") == "development":
+    _beat_schedule["check-all-alerts-hourly-dev"] = {
+        "task": "tasks.check_all_alerts",
+        "schedule": crontab(minute=0),  # every hour — development only
+    }
+
 celery_app.conf.update(
     task_serializer="json",
     result_serializer="json",
@@ -45,21 +59,10 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
     task_track_started=True,
-    task_acks_late=True,           # Only ack after success/failure
-    worker_prefetch_multiplier=1,  # Prevent memory overload on large models
-    result_expires=86400,          # Keep results for 24 h
-    # --------------- Scheduled tasks (Celery Beat) --------------------------
-    beat_schedule={
-        "check-all-alerts-daily": {
-            "task": "tasks.check_all_alerts",
-            "schedule": crontab(hour=8, minute=0),  # 08:00 UTC every day
-        },
-        "check-all-alerts-hourly-debug": {
-            # Only active in non-production; remove or disable in prod
-            "task": "tasks.check_all_alerts",
-            "schedule": crontab(minute=0) if os.getenv("ENV") == "development" else None,
-        },
-    },
+    task_acks_late=True,            # Only ack after success/failure
+    worker_prefetch_multiplier=1,   # Prevent memory overload on large models
+    result_expires=86400,           # Keep results for 24 h
+    beat_schedule=_beat_schedule,
 )
 
 
@@ -72,19 +75,19 @@ celery_app.conf.update(
     name="tasks.run_forecast_task",
     max_retries=3,
     default_retry_delay=30,
-    soft_time_limit=300,   # 5 min — raises SoftTimeLimitExceeded
-    time_limit=360,        # 6 min hard kill
+    soft_time_limit=300,    # 5 min — raises SoftTimeLimitExceeded
+    time_limit=360,         # 6 min hard kill
 )
 def run_forecast_task(self, data_path: str, item_id: str, horizon_months: int = 6):
     """
     Run the demand forecast pipeline for a single item.
 
     Progress states reported via Celery meta:
-      0%  – started
-      30% – data loaded and validated
-      60% – SARIMA fitted
-      90% – LSTM fitted, ensemble computed
-      100% – plot generated
+      0%  — started
+      30% — data loaded and validated
+      80% — SARIMA + LSTM fitted, ensemble computed
+      95% — plot generated
+      100% — result stored
 
     Returns a JSON-serialisable dict on success.
     """
@@ -92,24 +95,24 @@ def run_forecast_task(self, data_path: str, item_id: str, horizon_months: int = 
         self.update_state(state="STARTED", meta={"progress": 0, "item_id": item_id})
         logger.info("Forecast started | task_id=%s item_id=%s", self.request.id, item_id)
 
-        # --- 1. Load & validate data ---
+        # 1. Load & validate
         df = load_data(data_path)
         if item_id not in df["item_id"].values:
             raise ValueError(f"Item ID '{item_id}' not found in dataset.")
         self.update_state(state="STARTED", meta={"progress": 30, "item_id": item_id})
 
-        # --- 2. Run ensemble forecast ---
+        # 2. Run ensemble forecast
         future_dates, predicted_demand = predict_demand(df, item_id, horizon_months)
         self.update_state(state="STARTED", meta={"progress": 80, "item_id": item_id})
 
         if predicted_demand is None:
             raise ValueError(f"Could not generate a forecast for item '{item_id}'.")
 
-        # --- 3. Evaluate alerts ---
+        # 3. Evaluate alerts
         alerts = check_stock_and_alert(df, item_id, predicted_demand, future_dates)
 
-        # --- 4. Generate plot ---
-        plot_path = create_bokeh_plots(df, item_id, future_dates, predicted_demand, UPLOAD_FOLDER)
+        # 4. Generate Bokeh HTML chart
+        create_bokeh_plots(df, item_id, future_dates, predicted_demand, UPLOAD_FOLDER)
         self.update_state(state="STARTED", meta={"progress": 95, "item_id": item_id})
 
         result = {
@@ -144,12 +147,12 @@ def check_all_alerts():
     Evaluate every saved alert configuration.
 
     For each configured item:
-    1. Locate the most recently uploaded dataset for that item.
+    1. Locate the most recently uploaded dataset.
     2. Re-run forecast.
-    3. If predicted demand exceeds the configured threshold + current stock,
-       emit a structured alert (log + optional email stub).
+    3. If predicted demand exceeds stock + threshold, emit a structured alert.
 
-    This task is scheduled daily via Celery Beat.
+    Scheduled daily at 08:00 UTC via Celery Beat.
+    In development mode (ENV=development), runs every hour instead.
     """
     alert_file = UPLOAD_FOLDER / "alert_configs.json"
     if not alert_file.exists():
@@ -159,16 +162,17 @@ def check_all_alerts():
     with open(alert_file) as f:
         configs = json.load(f)
 
-    # Find the latest uploaded dataset
-    csv_files = sorted(UPLOAD_FOLDER.glob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
-    xlsx_files = sorted(UPLOAD_FOLDER.glob("*.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True)
-    all_uploads = csv_files + xlsx_files
+    # Find the most recently uploaded dataset
+    all_uploads = sorted(
+        list(UPLOAD_FOLDER.glob("*.csv")) + list(UPLOAD_FOLDER.glob("*.xlsx")),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
     if not all_uploads:
         logger.warning("No uploaded dataset found; skipping alert evaluation.")
         return {"checked": 0, "reason": "no_dataset"}
 
-    latest_dataset = all_uploads[0]
-    df = load_data(str(latest_dataset))
+    df = load_data(str(all_uploads[0]))
 
     triggered = []
     for item_id, config in configs.items():
@@ -179,13 +183,17 @@ def check_all_alerts():
 
             _, predicted_demand = predict_demand(df, item_id)
             alerts = check_stock_and_alert(
-                df, item_id, predicted_demand, [],
+                df,
+                item_id,
+                predicted_demand,
+                [],
                 threshold=config.get("low_stock_threshold", 0.0),
             )
-            reorder_alerts = [a for a in alerts if "reorder" in a.lower()]
+            reorder_alerts = [a for a in alerts if a.get("level") == "warning"]
             if reorder_alerts:
                 _emit_alert(item_id, reorder_alerts, config.get("notify_email"))
                 triggered.append(item_id)
+
         except Exception:
             logger.exception("Alert check failed for item_id=%s", item_id)
 
@@ -193,15 +201,24 @@ def check_all_alerts():
     return {"checked": len(configs), "triggered": triggered}
 
 
-def _emit_alert(item_id: str, alerts: list, email: str | None):
+def _emit_alert(item_id: str, alerts: list, email: str | None) -> None:
     """
-    Emit an alert. In production, swap the logger call for your
-    notification provider (SendGrid, SNS, PagerDuty, Slack webhook, etc.)
+    Emit a low-stock alert.
+
+    Currently logs a WARNING and stubs email.
+    In production, replace the email block with your provider:
+      SendGrid, AWS SES, Postmark, Slack webhook, PagerDuty, etc.
     """
-    for msg in alerts:
-        logger.warning("[ALERT] item_id=%s | %s | notify=%s", item_id, msg, email or "none")
+    for alert in alerts:
+        logger.warning("[ALERT] item_id=%s | %s | notify=%s", item_id, alert["message"], email or "none")
 
     if email:
-        # TODO: integrate with your email provider
-        # e.g. sendgrid_client.send(to=email, subject=..., body=...)
+        # TODO: integrate your email/notification provider here
+        # Example (SendGrid):
+        #   from sendgrid import SendGridAPIClient
+        #   from sendgrid.helpers.mail import Mail
+        #   msg = Mail(from_email="alerts@co.com", to_emails=email,
+        #              subject=f"Low stock — {item_id}",
+        #              plain_text_content="\n".join(a["message"] for a in alerts))
+        #   SendGridAPIClient(os.environ["SENDGRID_API_KEY"]).send(msg)
         logger.info("Email notification stub fired | to=%s item_id=%s", email, item_id)
