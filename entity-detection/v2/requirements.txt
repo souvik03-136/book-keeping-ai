@@ -1,4 +1,0 @@
-Flask==2.3.3
-Werkzeug==2.3.7
-word2number==1.1
-spacy==3.7.5

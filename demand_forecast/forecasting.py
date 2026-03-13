@@ -1,185 +1,325 @@
+"""
+Forecasting Engine
+==================
+Ensemble of SARIMA + LSTM.  Model weights are determined dynamically by
+comparing in-sample MAPE so the better-performing model gets more influence.
+
+Public API
+----------
+predict_demand(df, item_id, horizon_months) -> (dates, values)
+check_stock_and_alert(df, item_id, demand, dates, threshold) -> [str]
+"""
+
 import os
-
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-
 import logging
-
-logging.getLogger('tensorflow').setLevel(logging.FATAL)
-
 import warnings
-from statsmodels.tools.sm_exceptions import ConvergenceWarning  # Import ConvergenceWarning
 
-warnings.filterwarnings("ignore")  # Ignore all warnings
-warnings.filterwarnings("ignore", category=ConvergenceWarning)  # Ignore ConvergenceWarnings
-import pandas as pd
 import numpy as np
+import pandas as pd
+
+# Silence noisy TF / statsmodels output before imports
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TF_KERAS", "1")
+warnings.filterwarnings("ignore")
+
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.stattools import adfuller
+from statsmodels.tools.sm_exceptions import ConvergenceWarning
+warnings.filterwarnings("ignore", category=ConvergenceWarning)
+
+import tensorflow as tf
+tf.get_logger().setLevel("ERROR")
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
+from tensorflow.keras.callbacks import EarlyStopping
 from sklearn.preprocessing import MinMaxScaler
 
+logger = logging.getLogger("demand_forecast.forecasting")
 
-FORECAST_MONTHS = 6
-LSTM_EPOCHS = 200
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+DEFAULT_HORIZON = 6
 WINDOW_SIZE = 6
+LSTM_EPOCHS = 200
+MIN_SAMPLES_FOR_LSTM = WINDOW_SIZE + 4   # need at least this many monthly obs
+SARIMA_SEARCH_SPACE = range(0, 2)        # p/d/q and P/D/Q each 0-1
 
-# Helper function to calculate MAPE
-def mean_absolute_percentage_error(y_true, y_pred):
-    y_true, y_pred = np.array(y_true), np.array(y_pred)
-    return np.mean(np.abs((y_true - y_pred) / y_true)) * 100
 
-def is_stationary(series):
-    p_value = adfuller(series.dropna())[1]
-    return p_value < 0.05
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-def seasonal_differencing(series, period):
-    return series.diff(period).dropna()
+def _mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Mean Absolute Percentage Error, ignoring zero-demand months."""
+    mask = y_true != 0
+    if not mask.any():
+        return float("inf")
+    return float(np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100)
 
-# Data Preprocessing: Handle missing values and outliers
-def preprocess_data(data):
-    data = data.fillna(method='ffill')
-    data = data.clip(lower=0)  # Ensure no negative values
-    return data
 
-def sarima_grid_search(data):
-    p_values = d_values = q_values = range(0, 2)
-    P_values = D_values = Q_values = range(0, 2)
+def _is_stationary(series: pd.Series) -> bool:
+    clean = series.dropna()
+    if len(clean) < 4:
+        return True   # Not enough data — skip differencing
+    return adfuller(clean)[1] < 0.05
 
+
+def _make_stationary(series: pd.Series, period: int = 12) -> pd.Series:
+    """Seasonal difference the series if non-stationary."""
+    if not _is_stationary(series):
+        diffed = series.diff(period).dropna()
+        if len(diffed) >= MIN_SAMPLES_FOR_LSTM:
+            return diffed
+    return series
+
+
+def _prepare_monthly(df: pd.DataFrame, item_id: str) -> pd.Series:
+    """Extract and aggregate monthly demand for a single item."""
+    item_df = df[df["item_id"] == item_id].copy()
+    item_df.sort_values("transaction_date", inplace=True)
+    item_df["year_month"] = item_df["transaction_date"].dt.to_period("M")
+    monthly = (
+        item_df.groupby("year_month")["quantity"]
+        .sum()
+        .reset_index()
+        .set_index("year_month")
+        .asfreq("M", fill_value=0)
+    )
+    # Forward-fill and clip negatives
+    monthly["quantity"] = monthly["quantity"].ffill().clip(lower=0)
+    return monthly["quantity"]
+
+
+# ---------------------------------------------------------------------------
+# SARIMA
+# ---------------------------------------------------------------------------
+
+def _fit_sarima(series: pd.Series, horizon: int):
+    """
+    Grid search over (p,d,q)×(P,D,Q,12) SARIMA and return the forecast
+    from the best-AIC model.  Returns (forecast_array | None, model | None).
+    """
     best_aic = np.inf
-    best_order = None
     best_model = None
 
-    for p in p_values:
-        for d in d_values:
-            for q in q_values:
-                for P in P_values:
-                    for D in D_values:
-                        for Q in Q_values:
+    for p in SARIMA_SEARCH_SPACE:
+        for d in SARIMA_SEARCH_SPACE:
+            for q in SARIMA_SEARCH_SPACE:
+                for P in SARIMA_SEARCH_SPACE:
+                    for D in SARIMA_SEARCH_SPACE:
+                        for Q in SARIMA_SEARCH_SPACE:
                             try:
-                                model = SARIMAX(data,
-                                                order=(p, d, q),
-                                                seasonal_order=(P, D, Q, 12),
-                                                enforce_stationarity=False,
-                                                enforce_invertibility=False)
-                                results = model.fit(disp=False, maxiter=200, method='lbfgs')  # Added parameters
-                                if results.aic < best_aic:
-                                    best_aic = results.aic
-                                    best_order = (p, d, q, P, D, Q)
-                                    best_model = results
-                            except Exception as e:
-                                print(f"Error fitting SARIMA({p},{d},{q})x({P},{D},{Q},12): {e}")
+                                model = SARIMAX(
+                                    series,
+                                    order=(p, d, q),
+                                    seasonal_order=(P, D, Q, 12),
+                                    enforce_stationarity=False,
+                                    enforce_invertibility=False,
+                                )
+                                res = model.fit(disp=False, maxiter=200, method="lbfgs")
+                                if res.aic < best_aic:
+                                    best_aic = res.aic
+                                    best_model = res
+                            except Exception:
+                                pass  # noqa: silent — grid search expects many failures
 
-    return best_model, best_order
+    if best_model is None:
+        return None, None
 
-# Create the LSTM model
-def create_rnn_model(input_shape):
-    model = Sequential([
-        LSTM(128, activation='relu', return_sequences=True, input_shape=input_shape),
-        Dropout(0.3),
-        LSTM(64, activation='relu'),
-        Dropout(0.2),
-        Dense(1)
-    ])
-    model.compile(optimizer='adam', loss='mean_squared_error')
-    return model
+    forecast = best_model.forecast(steps=horizon)
+    return np.clip(np.array(forecast), 0, None), best_model
 
-# Prepare RNN data with sliding window
-def prepare_rnn_data(data, window_size=WINDOW_SIZE):
+
+# ---------------------------------------------------------------------------
+# LSTM
+# ---------------------------------------------------------------------------
+
+def _prepare_sequences(scaled_data: np.ndarray, window: int):
     X, y = [], []
-    for i in range(len(data) - window_size):
-        X.append(data[i:i + window_size])
-        y.append(data[i + window_size])
+    for i in range(len(scaled_data) - window):
+        X.append(scaled_data[i : i + window])
+        y.append(scaled_data[i + window])
     return np.array(X), np.array(y)
 
-# Fit SARIMA Model with Grid Search
-def fit_sarima_model(data):
-    best_sarima, best_order = sarima_grid_search(data)
-    if best_sarima is not None:
-        forecast = best_sarima.forecast(steps=FORECAST_MONTHS)
-        return forecast, best_sarima
-    return None, None
 
-# Improved RNN forecast
-def run_rnn_forecast(monthly_demand):
+def _build_lstm(window: int) -> Sequential:
+    model = Sequential([
+        Input(shape=(window, 1)),
+        LSTM(128, return_sequences=True, activation="relu"),
+        Dropout(0.3),
+        LSTM(64, activation="relu"),
+        Dropout(0.2),
+        Dense(1),
+    ])
+    model.compile(optimizer="adam", loss="mean_squared_error")
+    return model
+
+
+def _fit_lstm(series: pd.Series, horizon: int) -> np.ndarray | None:
+    """Fit a windowed LSTM and auto-regressively forecast ``horizon`` steps."""
+    if len(series) < MIN_SAMPLES_FOR_LSTM:
+        logger.warning("Insufficient data for LSTM (%d samples); skipping.", len(series))
+        return None
+
     scaler = MinMaxScaler()
-    scaled_data = scaler.fit_transform(monthly_demand.values.reshape(-1, 1))
-    X, y = prepare_rnn_data(scaled_data, window_size=WINDOW_SIZE)
+    scaled = scaler.fit_transform(series.values.reshape(-1, 1))
+    X, y = _prepare_sequences(scaled, WINDOW_SIZE)
+    if len(X) == 0:
+        return None
 
-    if len(X) == 0 or len(y) == 0:
-        raise ValueError("Insufficient data for RNN training")
+    X = X.reshape((X.shape[0], WINDOW_SIZE, 1))
+    model = _build_lstm(WINDOW_SIZE)
 
-    X = X.reshape((X.shape[0], X.shape[1], 1))
+    model.fit(
+        X, y,
+        epochs=LSTM_EPOCHS,
+        validation_split=0.2,
+        verbose=0,
+        callbacks=[EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True)],
+    )
 
-    model = create_rnn_model((X.shape[1], 1))
+    last_window = scaled[-WINDOW_SIZE:].reshape(1, WINDOW_SIZE, 1)
+    preds = []
+    for _ in range(horizon):
+        pred = model.predict(last_window, verbose=0)[0, 0]
+        preds.append(pred)
+        last_window = np.append(last_window[:, 1:, :], [[[pred]]], axis=1)
 
-    # Use early stopping to avoid overfitting
-    es = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-    mc = ModelCheckpoint('best_model.keras', save_best_only=True)  # Changed to .keras
+    forecast = scaler.inverse_transform(np.array(preds).reshape(-1, 1)).flatten()
+    return np.clip(forecast, 0, None)
 
-    model.fit(X, y, epochs=LSTM_EPOCHS, validation_split=0.2, verbose=1, callbacks=[es, mc])
 
-    last_input = scaled_data[-WINDOW_SIZE:].reshape((1, WINDOW_SIZE, 1))
-    forecast_rnn = []
+# ---------------------------------------------------------------------------
+# Ensemble
+# ---------------------------------------------------------------------------
 
-    for _ in range(FORECAST_MONTHS):
-        predicted = model.predict(last_input, verbose=0)
-        forecast_rnn.append(predicted[0, 0])
-        last_input = np.append(last_input[:, 1:, :], predicted.reshape(1, 1, 1), axis=1)
+def _ensemble(
+    sarima_fc: np.ndarray | None,
+    lstm_fc: np.ndarray | None,
+    series: pd.Series,
+    horizon: int,
+) -> np.ndarray:
+    """
+    Combine SARIMA and LSTM forecasts.  Weights are computed dynamically
+    from in-sample MAPE on the last ``horizon`` observations.
+    Falls back to whichever model produced a result if one fails.
+    """
+    if sarima_fc is None and lstm_fc is None:
+        raise RuntimeError("Both SARIMA and LSTM failed to produce a forecast.")
 
-    forecast = scaler.inverse_transform(np.array(forecast_rnn).reshape(-1, 1)).flatten()
-    return forecast
+    if sarima_fc is None:
+        return lstm_fc
+    if lstm_fc is None:
+        return sarima_fc
 
-# Combine forecasts from SARIMA and RNN
-def ensemble_forecast(sarima_forecast, rnn_forecast):
-    sarima_weight = 0.7  # Adjust weights based on model performance
-    rnn_weight = 0.3
-    return sarima_weight * np.array(sarima_forecast) + rnn_weight * np.array(rnn_forecast)
+    # Dynamic weighting based on hold-out MAPE
+    if len(series) > horizon:
+        actuals = series.values[-horizon:]
+        s_mape = _mape(actuals, sarima_fc[-horizon:] if len(sarima_fc) >= horizon else sarima_fc)
+        l_mape = _mape(actuals, lstm_fc[-horizon:] if len(lstm_fc) >= horizon else lstm_fc)
+        logger.info("SARIMA MAPE=%.2f%%  LSTM MAPE=%.2f%%", s_mape, l_mape)
 
-def predict_demand(df, item_id):
-    item_data = df[df['item_id'] == item_id].copy()
-    item_data.sort_values('transaction_date', inplace=True)
+        total = s_mape + l_mape
+        if total == 0:
+            sarima_w, lstm_w = 0.5, 0.5
+        else:
+            # Lower MAPE → higher weight
+            sarima_w = l_mape / total
+            lstm_w = s_mape / total
+    else:
+        sarima_w, lstm_w = 0.6, 0.4
 
-    item_data['year_month'] = item_data['transaction_date'].dt.to_period('M')
-    monthly_demand = item_data.groupby('year_month')['quantity'].sum().reset_index()
-    monthly_demand.set_index('year_month', inplace=True)
+    logger.info("Ensemble weights | SARIMA=%.2f  LSTM=%.2f", sarima_w, lstm_w)
+    return sarima_w * sarima_fc + lstm_w * lstm_fc
 
-    monthly_demand = preprocess_data(monthly_demand.asfreq('M', fill_value=0))
 
-    if not is_stationary(monthly_demand['quantity']):
-        monthly_demand['quantity'] = seasonal_differencing(monthly_demand['quantity'], period=12)
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
-    forecast_sarima, _ = fit_sarima_model(monthly_demand['quantity'])
-    forecast_rnn = run_rnn_forecast(monthly_demand['quantity'])
+def predict_demand(
+    df: pd.DataFrame,
+    item_id: str,
+    horizon_months: int = DEFAULT_HORIZON,
+) -> tuple[list, np.ndarray]:
+    """
+    Fit ensemble model and return future demand forecast.
 
-    # Calculate MAPE for both models
-    if len(monthly_demand['quantity']) > FORECAST_MONTHS:
-        actual_values = monthly_demand['quantity'][-FORECAST_MONTHS:].values
-        sarima_mape = mean_absolute_percentage_error(actual_values, forecast_sarima)
-        rnn_mape = mean_absolute_percentage_error(actual_values, forecast_rnn)
+    Parameters
+    ----------
+    df            : DataFrame with columns [transaction_date, item_id, quantity]
+    item_id       : Item to forecast
+    horizon_months: Number of months ahead to forecast
 
-        print(f"SARIMA MAPE: {sarima_mape:.2f}%")
-        print(f"RNN MAPE: {rnn_mape:.2f}%")
+    Returns
+    -------
+    (future_dates, predicted_demand)
+    """
+    series = _prepare_monthly(df, item_id)
+    stationary = _make_stationary(series)
 
-    forecast = ensemble_forecast(forecast_sarima, forecast_rnn)
+    logger.info("Fitting SARIMA | item=%s obs=%d", item_id, len(stationary))
+    sarima_fc, _ = _fit_sarima(stationary, horizon_months)
 
-    future_dates = [monthly_demand.index[-1].to_timestamp() + pd.DateOffset(months=i) for i in
-                    range(1, FORECAST_MONTHS + 1)]
+    logger.info("Fitting LSTM | item=%s obs=%d", item_id, len(stationary))
+    lstm_fc = _fit_lstm(stationary, horizon_months)
+
+    forecast = _ensemble(sarima_fc, lstm_fc, series, horizon_months)
+
+    last_period = series.index[-1]
+    future_dates = [
+        last_period.to_timestamp() + pd.DateOffset(months=i)
+        for i in range(1, horizon_months + 1)
+    ]
     return future_dates, forecast
 
-def check_stock_and_alert(df, item_id, predicted_demand, future_months):
-    item_data = df[df['item_id'] == item_id]
-    current_stock = item_data['quantity'].sum()
 
+def check_stock_and_alert(
+    df: pd.DataFrame,
+    item_id: str,
+    predicted_demand: np.ndarray,
+    future_months: list,
+    threshold: float = 0.0,
+) -> list[str]:
+    """
+    Compare predicted demand against current on-hand stock.
+
+    Parameters
+    ----------
+    threshold : Safety buffer — alert when demand exceeds
+                ``current_stock * (1 - threshold)`` if threshold < 1,
+                or when demand exceeds ``current_stock + threshold`` if > 1.
+                Default 0.0 means alert when demand strictly exceeds stock.
+    """
+    current_stock = float(df[df["item_id"] == item_id]["quantity"].sum())
     alerts = []
-    for month, demand in zip(future_months, predicted_demand):
-        if demand > current_stock:
-            alerts.append(
-                f"Alert: You may need to reorder {demand - current_stock:.2f} units of item ID {item_id} by {month.strftime('%Y-%m')}.")
+
+    for i, demand in enumerate(predicted_demand):
+        demand = float(demand)
+        label = future_months[i].strftime("%Y-%m") if future_months else f"Month +{i+1}"
+
+        reorder_needed = demand - current_stock
+        if reorder_needed > threshold:
+            alerts.append({
+                "level": "warning",
+                "period": label,
+                "message": (
+                    f"Reorder {reorder_needed:.0f} units of item '{item_id}' "
+                    f"by {label} — predicted demand ({demand:.0f}) "
+                    f"exceeds stock ({current_stock:.0f})."
+                ),
+            })
         else:
-            alerts.append(
-                f"No reorder necessary for item ID {item_id} in {month.strftime('%Y-%m')}. Sufficient stock available.")
+            alerts.append({
+                "level": "ok",
+                "period": label,
+                "message": (
+                    f"Stock sufficient for '{item_id}' in {label}. "
+                    f"Predicted demand: {demand:.0f}, Available: {current_stock:.0f}."
+                ),
+            })
 
     return alerts

@@ -1,0 +1,84 @@
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install forecast deps
+        run: pip install -r demand_forecast/requirements.txt
+
+      - name: Install entity detection deps
+        run: |
+          pip install -r entity_detection/requirements.txt
+          python -m spacy download en_core_web_sm
+
+      - name: Install test deps
+        run: pip install pytest
+
+      - name: Run tests
+        env:
+          API_KEY: test-key
+          REDIS_URL: redis://localhost:6379/0
+          GROQ_API_KEY: dummy-for-tests
+        run: pytest tests/ -v --tb=short
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Lint with ruff
+        run: ruff check demand_forecast/ entity_detection/ tests/
+
+  docker:
+    name: Docker Build Check
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build forecast image
+        run: docker build -t book-keeping-forecast ./demand_forecast
+
+      - name: Build entity image
+        run: docker build -t book-keeping-entity ./entity_detection

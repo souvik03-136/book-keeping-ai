@@ -1,0 +1,19 @@
+# Web framework
+flask==3.0.3
+flask-cors==4.0.1
+gunicorn==22.0.0
+
+# Input validation
+marshmallow==3.21.3
+
+# Rate limiting
+flask-limiter==3.7.0
+redis==5.0.7
+
+# NLP
+spacy==3.7.5
+word2number==1.1
+
+# LLM client
+groq==0.9.0
+python-dotenv==1.0.1
