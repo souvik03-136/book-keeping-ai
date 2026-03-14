@@ -1,9 +1,23 @@
+line-length = 100
+
 [lint]
-select = ["E", "F", "W", "I"]
-ignore = [
-    "E402",   # Module level import not at top — intentional in forecasting.py
-              # (env vars and warnings.filterwarnings must run before TF/statsmodels import)
+select  = ["E", "F", "W", "I"]
+ignore  = [
+    # E402: imports not at top — intentional in forecasting.py (env vars and
+    # warnings.filterwarnings must run before TensorFlow/statsmodels import).
+    "E402",
 ]
 
 [lint.per-file-ignores]
-"tests/*" = ["F401"]   # test files import things that look unused to ruff
+# Test fixtures use importlib.util / inline imports that look unused to ruff.
+"tests/*" = ["F401", "I001"]
+
+[lint.isort]
+# Flat service-internal modules are first-party (not installed packages).
+known-first-party = ["tasks", "utils", "forecasting", "bokeh_forecast"]
+
+[lint.pycodestyle]
+max-line-length = 100
+
+[format]
+line-length = 100

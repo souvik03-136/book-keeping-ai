@@ -1,21 +1,22 @@
 """
-Demand Forecasting Service - Production Grade
+Demand Forecasting Service — Production Grade
 =============================================
 Async forecast pipeline with Celery + Redis, proper validation,
 structured logging, and per-user file isolation.
 """
 
-import os
-import logging
-from pathlib import Path
 from functools import wraps
+import json
+import logging
+import os
+from pathlib import Path
 
-from flask import Flask, request, jsonify, send_file
+from celery.result import AsyncResult
+from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-from marshmallow import Schema, fields, ValidationError
-from celery.result import AsyncResult
+from marshmallow import Schema, ValidationError, fields
 
 from tasks import celery_app, run_forecast_task
 from utils import allowed_file, get_upload_path, sanitize_item_id
@@ -25,22 +26,29 @@ from utils import allowed_file, get_upload_path, sanitize_item_id
 # ---------------------------------------------------------------------------
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": os.getenv("ALLOWED_ORIGINS", "*").split(",")}})
+_origins = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+CORS(app, resources={r"/api/*": {"origins": _origins}})
 
 UPLOAD_FOLDER = Path(os.getenv("UPLOAD_FOLDER", "uploads"))
 UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
 app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_UPLOAD_MB", 16)) * 1024 * 1024
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "change-me-in-production")
 
-# Rate limiting
+# Use memory:// fallback so tests pass without a live Redis instance.
+_storage_uri = (
+    os.getenv("REDIS_URL", "redis://redis:6379/0")
+    if os.getenv("ENV") != "test"
+    else "memory://"
+)
+
 limiter = Limiter(
     key_func=get_remote_address,
     app=app,
     default_limits=["200 per day", "50 per hour"],
-    storage_uri=os.getenv("REDIS_URL", "redis://redis:6379/0"),
+    storage_uri=_storage_uri,
+    on_breach=lambda: None,
 )
 
-# Structured logging
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
@@ -49,12 +57,15 @@ logger = logging.getLogger("demand_forecast")
 
 
 # ---------------------------------------------------------------------------
-# Request / response schemas (marshmallow)
+# Schemas
 # ---------------------------------------------------------------------------
 
 class ForecastRequestSchema(Schema):
     item_id = fields.Str(required=True)
-    horizon_months = fields.Int(load_default=6, validate=lambda n: 1 <= n <= 24)
+    horizon_months = fields.Int(
+        load_default=6,
+        validate=lambda n: 1 <= n <= 24,
+    )
 
 
 class AlertConfigSchema(Schema):
@@ -64,7 +75,7 @@ class AlertConfigSchema(Schema):
 
 
 # ---------------------------------------------------------------------------
-# Auth stub (replace with JWT / API-key middleware in production)
+# Auth
 # ---------------------------------------------------------------------------
 
 def require_api_key(f):
@@ -95,12 +106,7 @@ def health():
 @require_api_key
 @limiter.limit("10 per minute")
 def upload_file():
-    """
-    Upload a CSV or XLSX dataset.
-
-    Stores the file under a stable, sanitised filename.
-    Returns a ``file_id`` that must be passed to ``/forecast``.
-    """
+    """Upload a CSV or XLSX dataset. Returns a ``file_id`` for use with /forecast."""
     if "file" not in request.files:
         return jsonify({"error": "No file part in the request"}), 400
 
@@ -109,13 +115,16 @@ def upload_file():
         return jsonify({"error": "No file selected"}), 400
 
     if not allowed_file(file.filename):
-        return jsonify({"error": "Only .csv and .xlsx files are allowed"}), 415
+        return jsonify({"error": "Only .csv and .xlsx files are allowed"}), 400
 
     try:
         file_id, dest = get_upload_path(UPLOAD_FOLDER, file.filename)
         file.save(dest)
         logger.info("File uploaded | file_id=%s path=%s", file_id, dest)
-        return jsonify({"message": "File uploaded successfully", "file_id": file_id}), 201
+        return jsonify({
+            "message": "File uploaded successfully",
+            "file_id": file_id,
+        }), 201
     except Exception:
         logger.exception("File upload failed")
         return jsonify({"error": "Failed to save file"}), 500
@@ -129,28 +138,25 @@ def upload_file():
 @require_api_key
 @limiter.limit("20 per hour")
 def forecast():
-    """
-    Enqueue a forecast job.
-
-    Returns a ``task_id`` immediately; poll ``/api/v1/tasks/<task_id>``
-    for the result.
-    """
+    """Enqueue a forecast job and return a task_id to poll."""
     schema = ForecastRequestSchema()
     try:
         data = schema.load(request.get_json(force=True) or {})
     except ValidationError as err:
         return jsonify({"error": "Invalid request", "details": err.messages}), 422
 
-    file_id = request.args.get("file_id") or (request.get_json(force=True) or {}).get("file_id")
+    body = request.get_json(force=True) or {}
+    file_id = request.args.get("file_id") or body.get("file_id")
     if not file_id:
         return jsonify({"error": "file_id is required (upload a file first)"}), 400
 
     upload_path = UPLOAD_FOLDER / f"{file_id}"
     if not upload_path.exists():
-        # Try to find by prefix (extension may differ)
         matches = list(UPLOAD_FOLDER.glob(f"{file_id}*"))
         if not matches:
-            return jsonify({"error": f"file_id '{file_id}' not found. Please upload first."}), 404
+            return jsonify({
+                "error": f"file_id '{file_id}' not found. Please upload first.",
+            }), 404
         upload_path = matches[0]
 
     item_id = sanitize_item_id(data["item_id"])
@@ -181,13 +187,26 @@ def task_status(task_id: str):
 
     if result.state == "STARTED":
         meta = result.info or {}
-        return jsonify({"task_id": task_id, "status": "running", "progress": meta.get("progress", 0)}), 202
+        progress = meta.get("progress", 0)
+        return jsonify({
+            "task_id": task_id,
+            "status": "running",
+            "progress": progress,
+        }), 202
 
     if result.state == "SUCCESS":
-        return jsonify({"task_id": task_id, "status": "success", "result": result.result}), 200
+        return jsonify({
+            "task_id": task_id,
+            "status": "success",
+            "result": result.result,
+        }), 200
 
     if result.state == "FAILURE":
-        return jsonify({"task_id": task_id, "status": "failed", "error": str(result.result)}), 500
+        return jsonify({
+            "task_id": task_id,
+            "status": "failed",
+            "error": str(result.result),
+        }), 500
 
     return jsonify({"task_id": task_id, "status": result.state}), 200
 
@@ -208,27 +227,20 @@ def get_plot(item_id: str):
 
 
 # ---------------------------------------------------------------------------
-# Alert configuration (persisted to Redis / DB stub)
+# Alert configuration
 # ---------------------------------------------------------------------------
 
 @app.route("/api/v1/alerts", methods=["POST"])
 @require_api_key
 @limiter.limit("30 per hour")
 def configure_alert():
-    """
-    Persist a low-stock alert configuration for an item.
-
-    The scheduler (Celery Beat) will evaluate these daily.
-    """
+    """Persist a low-stock alert configuration for an item."""
     schema = AlertConfigSchema()
     try:
         data = schema.load(request.get_json(force=True) or {})
     except ValidationError as err:
         return jsonify({"error": "Invalid request", "details": err.messages}), 422
 
-    # In a real system this would write to Postgres/Redis.
-    # For now, persist to a simple JSON file as a reference implementation.
-    import json
     alert_file = UPLOAD_FOLDER / "alert_configs.json"
     configs = {}
     if alert_file.exists():
@@ -242,7 +254,10 @@ def configure_alert():
         json.dump(configs, f, indent=2)
 
     logger.info("Alert configured | item_id=%s", data["item_id"])
-    return jsonify({"message": "Alert configuration saved", "item_id": data["item_id"]}), 201
+    return jsonify({
+        "message": "Alert configuration saved",
+        "item_id": data["item_id"],
+    }), 201
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +272,10 @@ def request_entity_too_large(_):
 
 @app.errorhandler(429)
 def ratelimit_handler(e):
-    return jsonify({"error": "Rate limit exceeded", "retry_after": str(e.description)}), 429
+    return jsonify({
+        "error": "Rate limit exceeded",
+        "retry_after": str(e.description),
+    }), 429
 
 
 @app.errorhandler(500)

@@ -5,36 +5,43 @@ Unified API combining LLM-based extraction (Groq) and rule-based NLP (spaCy).
 
 Strategy
 --------
-- /api/v1/extract         — Full transaction entity extraction (LLM + spaCy fallback)
+- /api/v1/extract          — Full transaction entity extraction (LLM + spaCy fallback)
 - /api/v1/extract/entities — Query entity extraction (rule-based, deterministic)
 
 Both endpoints validate input with marshmallow, apply rate limiting, and
 return structured, consistent JSON responses.
 """
 
+from functools import wraps
 import logging
 import os
 import re
-from functools import wraps
 
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-from marshmallow import Schema, fields, ValidationError, validate
+from marshmallow import Schema, ValidationError, fields, validate
 
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": os.getenv("ALLOWED_ORIGINS", "*").split(",")}})
+_origins = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+CORS(app, resources={r"/api/*": {"origins": _origins}})
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+
+# Use memory:// fallback so tests pass without a live Redis instance.
+# In production the REDIS_URL env var points to the real broker.
+_storage_uri = REDIS_URL if os.getenv("ENV") != "test" else "memory://"
+
 limiter = Limiter(
     key_func=get_remote_address,
     app=app,
     default_limits=["300 per day", "60 per hour"],
-    storage_uri=REDIS_URL,
+    storage_uri=_storage_uri,
+    on_breach=lambda: None,
 )
 
 logging.basicConfig(
@@ -87,7 +94,7 @@ class EntityQuerySchema(Schema):
 
 
 # ---------------------------------------------------------------------------
-# Auth stub
+# Auth
 # ---------------------------------------------------------------------------
 
 def require_api_key(f):
@@ -127,10 +134,7 @@ def _validate_price_qty(price: str, quantity: str) -> tuple[str, str]:
 
 
 def _extract_with_llm(text: str) -> dict | None:
-    """
-    Use Groq (llama3-8b) to extract transaction entities.
-    Returns a dict or None on failure.
-    """
+    """Use Groq (llama3-8b) to extract transaction entities."""
     try:
         client = get_groq()
         response = client.chat.completions.create(
@@ -138,9 +142,13 @@ def _extract_with_llm(text: str) -> dict | None:
                 "role": "system",
                 "content": (
                     "You are a precise entity extractor. "
-                    "Extract CustomerName, Price, ItemName, and ItemQuantity from the transaction text. "
+                    "Extract CustomerName, Price, ItemName, and "
+                    "ItemQuantity from the transaction text. "
                     "Respond ONLY in this exact format with no other text:\n"
-                    "CustomerName: <value>\nPrice: <value>\nItemName: <value>\nItemQuantity: <value>\n"
+                    "CustomerName: <value>\n"
+                    "Price: <value>\n"
+                    "ItemName: <value>\n"
+                    "ItemQuantity: <value>\n"
                     "Use 'not_found' for missing values."
                 ),
             }, {
@@ -175,9 +183,7 @@ def _parse_llm_response(raw: str) -> dict:
 
 
 def _extract_with_nlp(text: str) -> dict:
-    """
-    spaCy NER + regex fallback extraction.
-    """
+    """spaCy NER + regex fallback extraction."""
     nlp = get_nlp()
     doc = nlp(text)
 
@@ -191,7 +197,6 @@ def _extract_with_nlp(text: str) -> dict:
         elif ent.label_ == "PRODUCT" and not item:
             item = ent.text
 
-    # Regex fallbacks
     qty_match = re.search(r"(\d+)\s+([a-zA-Z]+)\s+for", text, re.IGNORECASE)
     if qty_match:
         if not qty:
@@ -215,7 +220,8 @@ def _extract_with_nlp(text: str) -> dict:
 
 
 def _is_complete(entities: dict) -> bool:
-    return all(entities.get(k) for k in ["CustomerName", "Price", "ItemName", "ItemQuantity"])
+    keys = ["CustomerName", "Price", "ItemName", "ItemQuantity"]
+    return all(entities.get(k) for k in keys)
 
 
 # ---------------------------------------------------------------------------
@@ -238,23 +244,6 @@ def extract():
     - ``llm``  : Groq LLM only
     - ``nlp``  : spaCy only
     - ``auto`` : LLM first, fall back to NLP if incomplete (default)
-
-    Request body
-    ------------
-    {
-        "text": "John Doe bought 2 apples for $5",
-        "backend": "auto"   // optional
-    }
-
-    Response
-    --------
-    {
-        "CustomerName": "John Doe",
-        "ItemName": "apples",
-        "ItemQuantity": "2",
-        "Price": "5",
-        "_backend_used": "llm"
-    }
     """
     schema = ExtractRequestSchema()
     try:
@@ -289,7 +278,9 @@ def extract():
         }), 422
 
     entities["_backend_used"] = backend_used
-    logger.info("Extracted entities | backend=%s text_len=%d", backend_used, len(text))
+    logger.info(
+        "Extracted entities | backend=%s text_len=%d", backend_used, len(text)
+    )
     return jsonify(entities), 200
 
 
@@ -300,18 +291,11 @@ def extract_entities():
     """
     Parse a natural-language inventory query into a structured filter.
 
-    Supports:
-    - "apples less than 50"          → {object, action: "less", range}
-    - "oranges more than 100"        → {object, action: "more", range}
-    - "apples more than 20 less than 80" → {object, action: "range", min, max}
+    Supports::
 
-    Request body
-    ------------
-    { "text": "apples less than 50 rs" }
-
-    Response
-    --------
-    { "object": "apples", "action": "less", "range": "50" }
+        "apples less than 50"              → {object, action: "less", range}
+        "oranges more than 100"            → {object, action: "more", range}
+        "apples more than 20 less than 80" → {object, action: "range", min, max}
     """
     schema = EntityQuerySchema()
     try:
@@ -321,12 +305,14 @@ def extract_entities():
 
     text = data["text"].lower().strip()
 
-    range_re = re.compile(r"(\w+)\s+more\s+than\s+(\d+)\s+(?:and\s+)?less\s+than\s+(\d+)")
-    less_re = re.compile(r"(?:(\w+)\s+)?less\s+than\s+(\d+)")
-    more_re = re.compile(r"(?:(\w+)\s+)?more\s+than\s+(\d+)")
-
     # Strip common currency/unit suffixes so "50 rs" → "50"
     text = re.sub(r"\s+(rs|usd|inr|eur|gbp|units?|pcs?|items?)$", "", text)
+
+    range_re = re.compile(
+        r"(\w+)\s+more\s+than\s+(\d+)\s+(?:and\s+)?less\s+than\s+(\d+)"
+    )
+    less_re = re.compile(r"(?:(\w+)\s+)?less\s+than\s+(\d+)")
+    more_re = re.compile(r"(?:(\w+)\s+)?more\s+than\s+(\d+)")
 
     m = range_re.search(text)
     if m:
@@ -357,7 +343,7 @@ def extract_entities():
         "error": (
             "Unrecognised query format. "
             "Try: \"apples less than 50\" or \"oranges more than 100\"."
-        )
+        ),
     }), 422
 
 
@@ -367,7 +353,10 @@ def extract_entities():
 
 @app.errorhandler(429)
 def ratelimit_handler(e):
-    return jsonify({"error": "Rate limit exceeded", "retry_after": str(e.description)}), 429
+    return jsonify({
+        "error": "Rate limit exceeded",
+        "retry_after": str(e.description),
+    }), 429
 
 
 @app.errorhandler(500)

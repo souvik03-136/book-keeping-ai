@@ -39,8 +39,10 @@ def create_bokeh_plots(
         quantity=[float(v) for v in predicted_demand],
     ))
 
-    hover = HoverTool(tooltips=[("Date", "@month{%b %Y}"), ("Quantity", "@quantity{0,0.0}")],
-                      formatters={"@month": "datetime"})
+    hover = HoverTool(
+        tooltips=[("Date", "@month{%b %Y}"), ("Quantity", "@quantity{0,0.0}")],
+        formatters={"@month": "datetime"},
+    )
 
     actual_plot = figure(
         title=f"Actual Demand — Item {item_id}",
@@ -52,10 +54,14 @@ def create_bokeh_plots(
         background_fill_color="#f8f8f8",
     )
     actual_plot.add_tools(hover)
-    actual_plot.line("month", "quantity", source=actual_source,
-                     line_width=2, color="#1f77b4", legend_label="Actual")
-    actual_plot.scatter("month", "quantity", source=actual_source,
-                        size=7, color="#1f77b4", alpha=0.7)
+    actual_plot.line(
+        "month", "quantity", source=actual_source,
+        line_width=2, color="#1f77b4", legend_label="Actual",
+    )
+    actual_plot.scatter(
+        "month", "quantity", source=actual_source,
+        size=7, color="#1f77b4", alpha=0.7,
+    )
 
     predicted_plot = figure(
         title=f"Predicted Demand — Item {item_id}",
@@ -67,11 +73,15 @@ def create_bokeh_plots(
         background_fill_color="#f8f8f8",
     )
     predicted_plot.add_tools(hover)
-    predicted_plot.line("month", "quantity", source=predicted_source,
-                        line_width=2, color="#ff7f0e", legend_label="Forecast",
-                        line_dash="dashed")
-    predicted_plot.scatter("month", "quantity", source=predicted_source,
-                           size=7, color="#ff7f0e", alpha=0.7)
+    predicted_plot.line(
+        "month", "quantity", source=predicted_source,
+        line_width=2, color="#ff7f0e", legend_label="Forecast",
+        line_dash="dashed",
+    )
+    predicted_plot.scatter(
+        "month", "quantity", source=predicted_source,
+        size=7, color="#ff7f0e", alpha=0.7,
+    )
 
     plot_path = upload_folder / f"forecast_{item_id}.html"
     output_file(str(plot_path), title=f"Forecast — Item {item_id}")

@@ -10,8 +10,8 @@ predict_demand(df, item_id, horizon_months) -> (dates, values)
 check_stock_and_alert(df, item_id, demand, dates, threshold) -> [str]
 """
 
-import os
 import logging
+import os
 import warnings
 
 # Must be set before tensorflow/statsmodels are imported
@@ -126,7 +126,7 @@ def _fit_sarima(series: pd.Series, horizon: int):
                                     best_aic = res.aic
                                     best_model = res
                             except Exception:
-                                pass  # noqa: silent — grid search expects many failures
+                                pass  # noqa: E722
 
     if best_model is None:
         return None, None
@@ -163,7 +163,9 @@ def _build_lstm(window: int) -> Sequential:
 def _fit_lstm(series: pd.Series, horizon: int) -> np.ndarray | None:
     """Fit a windowed LSTM and auto-regressively forecast ``horizon`` steps."""
     if len(series) < MIN_SAMPLES_FOR_LSTM:
-        logger.warning("Insufficient data for LSTM (%d samples); skipping.", len(series))
+        logger.warning(
+            "Insufficient data for LSTM (%d samples); skipping.", len(series)
+        )
         return None
 
     scaler = MinMaxScaler()
@@ -180,7 +182,9 @@ def _fit_lstm(series: pd.Series, horizon: int) -> np.ndarray | None:
         epochs=LSTM_EPOCHS,
         validation_split=0.2,
         verbose=0,
-        callbacks=[EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True)],
+        callbacks=[
+            EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True)
+        ],
     )
 
     last_window = scaled[-WINDOW_SIZE:].reshape(1, WINDOW_SIZE, 1)
@@ -220,8 +224,14 @@ def _ensemble(
     # Dynamic weighting based on hold-out MAPE
     if len(series) > horizon:
         actuals = series.values[-horizon:]
-        s_mape = _mape(actuals, sarima_fc[-horizon:] if len(sarima_fc) >= horizon else sarima_fc)
-        l_mape = _mape(actuals, lstm_fc[-horizon:] if len(lstm_fc) >= horizon else lstm_fc)
+        s_mape = _mape(
+            actuals,
+            sarima_fc[-horizon:] if len(sarima_fc) >= horizon else sarima_fc,
+        )
+        l_mape = _mape(
+            actuals,
+            lstm_fc[-horizon:] if len(lstm_fc) >= horizon else lstm_fc,
+        )
         logger.info("SARIMA MAPE=%.2f%%  LSTM MAPE=%.2f%%", s_mape, l_mape)
 
         total = s_mape + l_mape
