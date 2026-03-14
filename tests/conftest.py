@@ -1,3 +1,5 @@
+# book-keeping-ai/tests/conftest.py
+
 """
 conftest.py — path setup for the test suite.
 

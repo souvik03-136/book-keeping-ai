@@ -1,3 +1,5 @@
+# book-keeping-ai/tests/test_entity_detection.py
+
 """
 Tests — Entity Detection Service
 =================================
