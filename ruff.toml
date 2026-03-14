@@ -1,3 +1,5 @@
+# book-keeping-ai/ruff.toml
+
 [lint]
 select  = ["E", "F", "W", "I"]
 ignore  = [

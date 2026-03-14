@@ -62,8 +62,10 @@ jobs:
       - name: Install ruff
         run: pip install ruff
 
-      - name: Lint
-        run: ruff check --config ruff.toml demand_forecast/ entity_detection/ tests/
+      - name: Lint (auto-fix then check)
+        run: |
+          ruff check --config ruff.toml --fix demand_forecast/ entity_detection/ tests/
+          ruff check --config ruff.toml demand_forecast/ entity_detection/ tests/
 
   docker:
     name: Docker Build Check
