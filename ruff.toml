@@ -16,6 +16,3 @@ known-first-party = ["tasks", "utils", "forecasting", "bokeh_forecast"]
 
 [lint.pycodestyle]
 max-line-length = 100
-
-[format]
-line-length = 100
