@@ -1,10 +1,12 @@
+# book-keeping-ai/demand_forecast/utils.py
+
 """
 Utility helpers — validation, file handling, data loading.
 """
 
+import hashlib
 import re
 import uuid
-import hashlib
 from pathlib import Path
 
 import pandas as pd
@@ -43,8 +45,8 @@ def load_data(data_path: str) -> pd.DataFrame:
 
     Raises
     ------
-    ValueError  if required columns are missing
-    RuntimeError if the file type is unsupported
+    ValueError    if required columns are missing
+    RuntimeError  if the file type is unsupported
     """
     path = Path(data_path)
     ext = path.suffix.lower()
@@ -56,7 +58,6 @@ def load_data(data_path: str) -> pd.DataFrame:
     else:
         raise RuntimeError(f"Unsupported file type: {ext}")
 
-    # Normalise column names
     df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
 
     missing = REQUIRED_COLUMNS - set(df.columns)
@@ -73,5 +74,7 @@ def load_data(data_path: str) -> pd.DataFrame:
             f"{invalid_dates} rows have unparseable transaction_date values."
         )
 
-    df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0).clip(lower=0)
+    df["quantity"] = (
+        pd.to_numeric(df["quantity"], errors="coerce").fillna(0).clip(lower=0)
+    )
     return df

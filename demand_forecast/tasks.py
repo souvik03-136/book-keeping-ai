@@ -1,3 +1,5 @@
+# book-keeping-ai/demand_forecast/tasks.py
+
 """
 Celery Tasks
 ============
@@ -93,7 +95,9 @@ def run_forecast_task(self, data_path: str, item_id: str, horizon_months: int = 
     """
     try:
         self.update_state(state="STARTED", meta={"progress": 0, "item_id": item_id})
-        logger.info("Forecast started | task_id=%s item_id=%s", self.request.id, item_id)
+        logger.info(
+            "Forecast started | task_id=%s item_id=%s", self.request.id, item_id
+        )
 
         # 1. Load & validate
         df = load_data(data_path)
@@ -125,11 +129,15 @@ def run_forecast_task(self, data_path: str, item_id: str, horizon_months: int = 
             "generated_at": datetime.utcnow().isoformat() + "Z",
         }
 
-        logger.info("Forecast complete | task_id=%s item_id=%s", self.request.id, item_id)
+        logger.info(
+            "Forecast complete | task_id=%s item_id=%s", self.request.id, item_id
+        )
         return result
 
     except Exception as exc:
-        logger.exception("Forecast failed | task_id=%s item_id=%s", self.request.id, item_id)
+        logger.exception(
+            "Forecast failed | task_id=%s item_id=%s", self.request.id, item_id
+        )
         raise self.retry(exc=exc)
 
 
@@ -210,7 +218,10 @@ def _emit_alert(item_id: str, alerts: list, email: str | None) -> None:
       SendGrid, AWS SES, Postmark, Slack webhook, PagerDuty, etc.
     """
     for alert in alerts:
-        logger.warning("[ALERT] item_id=%s | %s | notify=%s", item_id, alert["message"], email or "none")
+        logger.warning(
+            "[ALERT] item_id=%s | %s | notify=%s",
+            item_id, alert["message"], email or "none",
+        )
 
     if email:
         # TODO: integrate your email/notification provider here
