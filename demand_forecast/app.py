@@ -1,3 +1,5 @@
+# book-keeping-ai/demand_forecast/app.py
+
 """
 Demand Forecasting Service — Production Grade
 =============================================
@@ -5,10 +7,10 @@ Async forecast pipeline with Celery + Redis, proper validation,
 structured logging, and per-user file isolation.
 """
 
-from functools import wraps
 import json
 import logging
 import os
+from functools import wraps
 from pathlib import Path
 
 from celery.result import AsyncResult

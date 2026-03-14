@@ -1,3 +1,5 @@
+# book-keeping-ai/entity_detection/app.py
+
 """
 Entity Detection Service — Production
 ======================================
@@ -12,10 +14,10 @@ Both endpoints validate input with marshmallow, apply rate limiting, and
 return structured, consistent JSON responses.
 """
 
-from functools import wraps
 import logging
 import os
 import re
+from functools import wraps
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request

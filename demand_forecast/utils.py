@@ -1,11 +1,13 @@
+# book-keeping-ai/demand_forecast/utils.py
+
 """
 Utility helpers — validation, file handling, data loading.
 """
 
 import hashlib
-from pathlib import Path
 import re
 import uuid
+from pathlib import Path
 
 import pandas as pd
 

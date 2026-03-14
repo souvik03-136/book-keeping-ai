@@ -1,3 +1,5 @@
+# book-keeping-ai/demand_forecast/tasks.py
+
 """
 Celery Tasks
 ============
@@ -10,10 +12,10 @@ check_all_alerts    — Periodic task (Celery Beat) that scans alert configs and
                       sends notifications when predicted demand exceeds stock.
 """
 
-from datetime import datetime
 import json
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 
 from celery import Celery
